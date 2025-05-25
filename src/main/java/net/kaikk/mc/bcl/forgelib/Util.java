@@ -23,7 +23,6 @@ public class Util {
         if (server == null) {
             return null;
         }
-        return server.worldServerForDimension(dimensionId); // Corrected for 1.7.10
+        return server.worldServerForDimension(dimensionId);
     }
 }
-

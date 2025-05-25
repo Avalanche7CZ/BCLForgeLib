@@ -1,30 +1,19 @@
 package net.kaikk.mc.bcl.forgelib;
 
-import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.FMLLog;
 import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.Mod.EventHandler;
 import cpw.mods.fml.common.Mod.Instance;
 import cpw.mods.fml.common.event.FMLInitializationEvent;
 import cpw.mods.fml.common.event.FMLLoadCompleteEvent;
+import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.event.FMLServerStartingEvent;
 import cpw.mods.fml.common.event.FMLServerStoppingEvent;
-import net.minecraft.nbt.CompressedStreamTools;
-import net.minecraft.nbt.NBTTagCompound;
-import net.minecraft.nbt.NBTTagList;
-import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.ChunkCoordIntPair;
 import net.minecraft.world.World;
-import net.minecraft.world.WorldServer;
-import net.minecraft.world.storage.ISaveHandler;
-import net.minecraftforge.common.DimensionManager;
 import net.minecraftforge.common.ForgeChunkManager;
 import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.common.util.Constants;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,7 +24,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public class BCLForgeLib {
     public static final String MODID = "BCLForgeLib";
     public static final String VERSION = "1.0";
-    private static final String DATA_FILE_NAME = "BCLForgeLib.dat";
 
     private ConcurrentHashMap<String, ForgeChunkManager.Ticket> activeTickets;
     private ConcurrentHashMap<String, List<ChunkLoader>> worldChunkLoaders;
@@ -48,9 +36,13 @@ public class BCLForgeLib {
     }
 
     @EventHandler
+    public void preInit(FMLPreInitializationEvent event) {
+        Config.init(event.getSuggestedConfigurationFile());
+    }
+
+    @EventHandler
     public void init(FMLInitializationEvent event) {
         MinecraftForge.EVENT_BUS.register(new EventListener());
-        FMLCommonHandler.instance().bus().register(new EventListener());
         this.activeTickets = new ConcurrentHashMap<>();
         this.worldChunkLoaders = new ConcurrentHashMap<>();
     }
@@ -81,7 +73,12 @@ public class BCLForgeLib {
 
     @EventHandler
     public void serverStarting(FMLServerStartingEvent event) {
-        loadAllChunkLoadersFromNBT();
+        if (Config.useNbtPersistence) {
+            logInfo("NBT Persistence is ENABLED. Loading chunk loaders from .dat files...");
+            NBTStorage.loadAllChunkLoadersFromNBT(this.worldChunkLoaders);
+        } else {
+            logInfo("NBT Persistence is DISABLED. BCLForgeLib will rely on external calls to add/remove chunk loaders.");
+        }
     }
 
     @EventHandler
@@ -112,10 +109,12 @@ public class BCLForgeLib {
         List<ChunkLoader> loaders = worldChunkLoaders.computeIfAbsent(worldName, k -> new ArrayList<>());
         if (!loaders.contains(chunkLoader)) {
             loaders.add(chunkLoader);
-            logInfo("Added chunk loader: " + chunkLoader);
-            saveChunkLoadersToNBT(worldName);
+            logInfo("Added chunk loader to internal tracking: " + chunkLoader);
+            if (Config.useNbtPersistence) {
+                NBTStorage.saveChunkLoadersToNBT(worldName, loaders);
+            }
         } else {
-            logInfo("Chunk loader already exists: " + chunkLoader);
+            logInfo("Chunk loader already exists in internal tracking: " + chunkLoader);
         }
 
         ForgeChunkManager.Ticket ticket = getOrCreateTicketForWorld(world);
@@ -142,8 +141,10 @@ public class BCLForgeLib {
         List<ChunkLoader> loaders = worldChunkLoaders.get(worldName);
 
         if (loaders != null && loaders.remove(chunkLoader)) {
-            logInfo("Removed chunk loader: " + chunkLoader);
-            saveChunkLoadersToNBT(worldName);
+            logInfo("Removed chunk loader from internal tracking: " + chunkLoader);
+            if (Config.useNbtPersistence) {
+                NBTStorage.saveChunkLoadersToNBT(worldName, loaders);
+            }
 
             ForgeChunkManager.Ticket ticket = activeTickets.get(worldName);
             if (ticket == null) {
@@ -162,7 +163,7 @@ public class BCLForgeLib {
                 }
             }
             if (loaders.isEmpty()) {
-                logInfo("No chunk loaders remaining for world " + worldName + ".");
+                logInfo("No chunk loaders remaining for world " + worldName + " in internal tracking.");
                 ForgeChunkManager.Ticket releasedTicket = activeTickets.remove(worldName);
                 if (releasedTicket != null) {
                     ForgeChunkManager.releaseTicket(releasedTicket);
@@ -170,11 +171,11 @@ public class BCLForgeLib {
                 }
             }
         } else {
-            logWarning("Chunk loader not found for removal: " + chunkLoader);
+            logWarning("Chunk loader not found in internal tracking for removal: " + chunkLoader);
         }
     }
 
-    private ForgeChunkManager.Ticket getOrCreateTicketForWorld(World world) {
+    ForgeChunkManager.Ticket getOrCreateTicketForWorld(World world) {
         String worldName = world.getWorldInfo().getWorldName();
         ForgeChunkManager.Ticket ticket = activeTickets.get(worldName);
         if (ticket == null) {
@@ -190,7 +191,7 @@ public class BCLForgeLib {
         return ticket;
     }
 
-    private void forceSingleChunk(ForgeChunkManager.Ticket ticket, int chunkX, int chunkZ) {
+    void forceSingleChunk(ForgeChunkManager.Ticket ticket, int chunkX, int chunkZ) {
         if (ticket == null) return;
         ChunkCoordIntPair chunk = new ChunkCoordIntPair(chunkX, chunkZ);
         if (ticket.getChunkList().size() < ticket.getMaxChunkListDepth() || ticket.getChunkList().contains(chunk)) {
@@ -233,162 +234,33 @@ public class BCLForgeLib {
         logInfo("World " + worldName + " unloading. Active ticket will be re-evaluated by Forge.");
     }
 
-    private File getDataFile(String worldName) {
-        World world = Util.getWorld(worldName);
-        if (world == null) {
-            MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
-            if (server == null) return null;
-            File worldDir = null;
-
-            WorldServer overworldServer = server.worldServerForDimension(0);
-            if (overworldServer != null && overworldServer.getWorldInfo().getWorldName().equals(worldName)) {
-                worldDir = overworldServer.getSaveHandler().getWorldDirectory();
-            } else {
-                for(WorldServer ws : server.worldServers) {
-                    if(ws != null && ws.getWorldInfo() != null && ws.getWorldInfo().getWorldName().equals(worldName)) {
-                        worldDir = ws.getSaveHandler().getWorldDirectory();
-                        break;
-                    }
-                }
-            }
-
-            if (worldDir == null) { // Fallback if world not in loaded worldServers (e.g. server just starting)
-                File savesDir = DimensionManager.getCurrentSaveRootDirectory();
-                if (savesDir == null) { // Should not happen on a running server
-                    savesDir = new File(".", server.getFolderName()); // Absolute last resort
-                }
-                worldDir = new File(savesDir, worldName); // This assumes worldName is the folder name
-                if (!worldDir.isDirectory() && overworldServer != null && worldName.equals(server.getFolderName())) { // Common case: "world"
-                    worldDir = new File(savesDir, server.getFolderName());
-                }
-            }
-
-            if (worldDir == null || !worldDir.isDirectory()) {
-                logError("Cannot get save directory for world " + worldName + " (world not loaded and fallback failed). Path tried: " + (worldDir != null ? worldDir.getAbsolutePath() : "null"));
-                return null;
-            }
-            File dataDir = new File(worldDir, "data");
-            if (!dataDir.exists()) dataDir.mkdirs();
-            return new File(dataDir, DATA_FILE_NAME);
-        }
-        ISaveHandler saveHandler = world.getSaveHandler();
-        File dataDir = new File(saveHandler.getWorldDirectory(), "data");
-        if (!dataDir.exists()) dataDir.mkdirs();
-        return new File(dataDir, DATA_FILE_NAME);
-    }
-
-
-    private void saveChunkLoadersToNBT(String worldName) {
-        File dataFile = getDataFile(worldName);
-        if (dataFile == null) {
-            logError("Cannot save chunk loaders: data file path is null for world " + worldName);
-            return;
-        }
-
-        NBTTagCompound root = new NBTTagCompound();
-        NBTTagList loaderListTag = new NBTTagList();
-        List<ChunkLoader> loaders = worldChunkLoaders.get(worldName);
-
-        if (loaders != null) {
-            for (ChunkLoader loader : loaders) {
-                NBTTagCompound loaderTag = new NBTTagCompound();
-                loaderTag.setString("worldName", loader.getWorldName());
-                loaderTag.setInteger("chunkX", loader.getChunkX());
-                loaderTag.setInteger("chunkZ", loader.getChunkZ());
-                loaderTag.setByte("range", loader.getRange());
-                loaderListTag.appendTag(loaderTag);
-            }
-        }
-        root.setTag("ChunkLoaders", loaderListTag);
-
-        try (FileOutputStream fos = new FileOutputStream(dataFile)) {
-            CompressedStreamTools.writeCompressed(root, fos);
-            logInfo("Saved " + (loaders != null ? loaders.size() : 0) + " chunk loaders for world " + worldName + " to " + dataFile.getAbsolutePath());
-        } catch (Exception e) {
-            logError("Failed to save chunk loaders for world " + worldName, e);
-        }
-    }
-
-    private void loadChunkLoadersFromNBT(String worldName) {
-        File dataFile = getDataFile(worldName);
-        if (dataFile == null || !dataFile.exists()) {
-            logInfo("No chunk loader data file found for world " + worldName + ", or world directory not accessible.");
-            return;
-        }
-
-        try (FileInputStream fis = new FileInputStream(dataFile)) {
-            NBTTagCompound root = CompressedStreamTools.readCompressed(fis);
-            NBTTagList loaderListTag = root.getTagList("ChunkLoaders", Constants.NBT.TAG_COMPOUND);
-            List<ChunkLoader> loadedLoaders = new ArrayList<>();
-
-            for (int i = 0; i < loaderListTag.tagCount(); i++) {
-                NBTTagCompound loaderTag = loaderListTag.getCompoundTagAt(i);
-                String LworldName = loaderTag.getString("worldName");
-                int chunkX = loaderTag.getInteger("chunkX");
-                int chunkZ = loaderTag.getInteger("chunkZ");
-                byte range = loaderTag.getByte("range");
-                ChunkLoader loader = new ChunkLoader(chunkX, chunkZ, LworldName, range);
-                loadedLoaders.add(loader);
-            }
-
-            worldChunkLoaders.put(worldName, loadedLoaders);
-            logInfo("Loaded " + loadedLoaders.size() + " chunk loaders for world " + worldName);
-
-            World world = Util.getWorld(worldName);
-            if (world != null) {
-                for (ChunkLoader loader : loadedLoaders) {
-                    ForgeChunkManager.Ticket ticket = getOrCreateTicketForWorld(world);
-                    if (ticket != null) {
-                        for (int k = -loader.getRange(); k <= loader.getRange(); k++) {
-                            for (int j = -loader.getRange(); j <= loader.getRange(); j++) {
-                                forceSingleChunk(ticket, loader.getChunkX() + k, loader.getChunkZ() + j);
+    public void loadChunkLoadersForSpecificWorld(String worldName) {
+        if (Config.useNbtPersistence) {
+            logInfo("NBT Persistence is ENABLED. Explicitly loading NBT for world: " + worldName);
+            List<ChunkLoader> loaded = NBTStorage.loadChunkLoadersFromNBT(worldName);
+            if (loaded != null) {
+                this.worldChunkLoaders.put(worldName, loaded);
+                World world = Util.getWorld(worldName);
+                if (world != null) {
+                    logInfo("NBT: World " + worldName + " is loaded. Re-forcing NBT-loaded chunks after specific world load.");
+                    for (ChunkLoader loader : loaded) {
+                        ForgeChunkManager.Ticket ticket = getOrCreateTicketForWorld(world);
+                        if (ticket != null) {
+                            for (int k = -loader.getRange(); k <= loader.getRange(); k++) {
+                                for (int j = -loader.getRange(); j <= loader.getRange(); j++) {
+                                    forceSingleChunk(ticket, loader.getChunkX() + k, loader.getChunkZ() + j);
+                                }
                             }
+                        } else {
+                            logError("NBT: Failed to get ticket for world " + worldName + " while re-forcing loaded chunks for " + loader + " after specific world load.");
                         }
-                    } else {
-                        logError("Failed to get ticket for world " + worldName + " while re-forcing loaded chunks for " + loader);
                     }
                 }
-            } else {
-                logWarning("World " + worldName + " not loaded during NBT load. Chunks will be forced by callback if ticket exists.");
             }
-
-        } catch (Exception e) {
-            logError("Failed to load chunk loaders for world " + worldName, e);
+        } else {
+            logInfo("NBT Persistence is DISABLED. Skipping explicit NBT load for world: " + worldName);
         }
     }
-
-    private void loadAllChunkLoadersFromNBT() {
-        MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
-        if (server == null) return;
-
-        for (WorldServer worldServer : server.worldServers) {
-            if (worldServer != null && worldServer.getWorldInfo() != null) {
-                loadChunkLoadersFromNBT(worldServer.getWorldInfo().getWorldName());
-            }
-        }
-
-        File savesDir = DimensionManager.getCurrentSaveRootDirectory();
-        if (savesDir != null && savesDir.isDirectory()) {
-            String serverFolderName = server.getFolderName();
-            File mainWorldDir = new File(savesDir, serverFolderName);
-
-            if (mainWorldDir != null && mainWorldDir.isDirectory()) {
-                String mainWorldName = "";
-                WorldServer overworld = server.worldServerForDimension(0);
-                if (overworld != null && overworld.getWorldInfo() != null) {
-                    mainWorldName = overworld.getWorldInfo().getWorldName();
-                } else { // Fallback if overworld not loaded by name
-                    mainWorldName = serverFolderName;
-                }
-
-                if (!mainWorldName.isEmpty() && !worldChunkLoaders.containsKey(mainWorldName)) {
-                    logInfo("Attempting to load NBT for main world directory: " + mainWorldName);
-                    loadChunkLoadersFromNBT(mainWorldName);
-                }
-            }
-        }
-    }
-
 
     private static Field getField(Class<?> targetClass, String fieldName) throws NoSuchFieldException, SecurityException {
         Field field = targetClass.getDeclaredField(fieldName);

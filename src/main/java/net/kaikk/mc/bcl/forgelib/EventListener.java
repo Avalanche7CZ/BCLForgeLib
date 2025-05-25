@@ -10,4 +10,12 @@ public class EventListener {
             BCLForgeLib.instance().onWorldUnload(event.world);
         }
     }
+
+    @SubscribeEvent
+    public void onWorldLoad(WorldEvent.Load event) {
+        if (event.world != null && !event.world.isRemote) {
+            BCLForgeLib.logInfo("[BCLForgeLib] Forge WorldEvent.Load detected for: " + event.world.getWorldInfo().getWorldName());
+            BCLForgeLib.instance().loadChunkLoadersForSpecificWorld(event.world.getWorldInfo().getWorldName());
+        }
+    }
 }
