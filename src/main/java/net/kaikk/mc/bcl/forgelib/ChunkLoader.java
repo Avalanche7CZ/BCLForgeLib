@@ -1,5 +1,7 @@
 package net.kaikk.mc.bcl.forgelib;
 
+import java.util.Objects;
+
 public class ChunkLoader {
     protected int chunkX;
     protected int chunkZ;
@@ -49,15 +51,11 @@ public class ChunkLoader {
         return chunkX == that.chunkX &&
                 chunkZ == that.chunkZ &&
                 range == that.range &&
-                worldName.equals(that.worldName);
+                Objects.equals(worldName, that.worldName);
     }
 
     @Override
     public int hashCode() {
-        int result = chunkX;
-        result = 31 * result + chunkZ;
-        result = 31 * result + worldName.hashCode();
-        result = 31 * result + (int) range;
-        return result;
+        return Objects.hash(chunkX, chunkZ, worldName, range);
     }
 }

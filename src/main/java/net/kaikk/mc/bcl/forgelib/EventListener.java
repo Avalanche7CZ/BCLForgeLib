@@ -7,15 +7,15 @@ public class EventListener {
     @SubscribeEvent
     public void onWorldUnload(WorldEvent.Unload event) {
         if (!event.isCanceled() && event.world != null && !event.world.isRemote) {
-            BCLForgeLib.instance().onWorldUnload(event.world);
+            BCLForgeLib.logInfo("World " + event.world.getWorldInfo().getWorldName() + " is unloading. Ticket will be managed by Forge.");
         }
     }
 
     @SubscribeEvent
     public void onWorldLoad(WorldEvent.Load event) {
         if (event.world != null && !event.world.isRemote) {
-            BCLForgeLib.logInfo("[BCLForgeLib] Forge WorldEvent.Load detected for: " + event.world.getWorldInfo().getWorldName());
-            BCLForgeLib.instance().loadChunkLoadersForSpecificWorld(event.world.getWorldInfo().getWorldName());
+            BCLForgeLib.logInfo("World " + event.world.getWorldInfo().getWorldName() + " has loaded.");
+            BCLForgeLib.instance().onWorldLoad(event.world);
         }
     }
 }
